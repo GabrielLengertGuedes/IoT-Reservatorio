@@ -5,7 +5,7 @@ FastAPI existir. Segue o contrato v1 (CONTRATOS.md).
 - Assina telemetria, alerta e status do medidor; ack, estado e status do
   controlador.
 - Publica o heartbeat a cada 10 s com liberaBomba:
-    false com nível >= 90 %                         (motivo NIVEL_ALTO)
+    false com nível >= 90 %, até cair para 87 %     (motivo NIVEL_ALTO)
     false sem leitura há mais de 30 s ou sensor FALHA (motivo SEM_LEITURA)
   e na hora em que liberaBomba muda, antes de qualquer comando.
 - Aplica a histerese 10 %/90 % a cada telemetria, mandando cmd com
@@ -34,7 +34,8 @@ PERIODO_HB_S = 10
 LEITURA_VELHA_S = 30
 NIVEL_LIGA = 10
 NIVEL_DESLIGA = 90
-NIVEL_ALTO = 90
+NIVEL_ALTO = 90       # liberaBomba=false (NIVEL_ALTO) a partir daqui...
+NIVEL_LIBERA = 87     # ...e só volta a true quando o nível cair até aqui
 TIMEOUT_REGRA_S = 5   # espera pelo EXECUTADO/REJEITADO do cmd da regra
 
 AJUDA = """comandos:
@@ -65,6 +66,7 @@ class Backend:
         self.seq_cmd = 0
         self.ultimo_cmd = None          # (topico, payload) para "repetir"
         self.libera_publicada = None     # (liberaBomba, motivo) do último heartbeat
+        self.bloqueio_alto = False       # NIVEL_ALTO ativo (com margem até NIVEL_LIBERA)
         # cmd da regra aguardando resposta: commandId, instante do envio e
         # instante da telemetria que o disparou (para medir a latência)
         self.cmd_regra = None
@@ -157,7 +159,14 @@ class Backend:
         nivel = (t.get("nivel") or {}).get("valor")
         if nivel is None:
             return False, "SEM_LEITURA"
+        # Margem: bloqueia em NIVEL_ALTO e só libera de novo em NIVEL_LIBERA.
+        # Sem ela, um nível oscilando em torno de 90 % alternaria a liberação
+        # (e o heartbeat imediato) a cada telemetria.
         if nivel >= NIVEL_ALTO:
+            self.bloqueio_alto = True
+        elif nivel <= NIVEL_LIBERA:
+            self.bloqueio_alto = False
+        if self.bloqueio_alto:
             return False, "NIVEL_ALTO"
         return True, None
 
