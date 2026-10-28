@@ -1,0 +1,26 @@
+digraph G {
+  graph [rankdir=TB, fontname="Liberation Sans", nodesep=0.45, ranksep=0.45, pad=0.2, dpi=170];
+  node  [shape=box, style="rounded,filled", fillcolor="white", color="#333333", fontname="Liberation Sans", fontsize=12, penwidth=1.3, margin="0.18,0.08"];
+  edge  [fontname="Liberation Sans", fontsize=10, color="#444444", penwidth=1.1, arrowsize=0.8];
+  INI [label="Início: carrega calibração e limites da NVS\n(altura útil, distância do nível cheio, limites de alerta, período)"];
+  LOOP [label="Laço principal com millis() (sem delay)", fillcolor="#eeeeee"];
+  LER [label="A cada 100 ms: pulso TRIG, eco com timeout de 25 ms\nA cada 3 s: temperatura do DS18B20"];
+  VAL [label="Leitura plausível?\n2 a 400 cm e -10 a 60 °C", shape=diamond, style="filled", fillcolor="white", margin="0.05,0.05"];
+  FAL [label="Estado FALHA_SENSOR\nLCD mostra falha, buzzer\nsensor = FALHA na telemetria", fillcolor="#f2dede"];
+  CALC [label="Mediana de 5 + média móvel\ncorrige c pela temperatura, calcula nível (%)"];
+  REG [label="Regra local (funciona sem rede):\nnível <= 10% ou >= 95% → alerta no LCD e buzzer"];
+  NET [label="Conectado ao broker?", shape=diamond, style="filled", fillcolor="white", margin="0.05,0.05"];
+  PUB [label="A cada 10 s: publica telemetria v1\n(com ts do NTP ou relogio = NAO_SINCRONIZADO)\nalerta publicado na hora do evento"];
+  REC [label="Tenta reconectar a cada 5 s\nao voltar: refaz assinatura de config\ne publica status online"];
+  CFG [label="Mensagem em config: valida faixa,\ngrava na NVS e aplica sem reiniciar"];
+  INI -> LOOP -> LER -> VAL;
+  VAL -> FAL [label=" não"];
+  VAL -> CALC [label=" sim"];
+  CALC -> REG -> NET;
+  FAL -> NET;
+  NET -> PUB [label=" sim"];
+  NET -> REC [label=" não"];
+  PUB -> LOOP [style=dashed];
+  REC -> LOOP [style=dashed];
+  PUB -> CFG [style=dotted, label=" ao receber", arrowhead=normal];
+}

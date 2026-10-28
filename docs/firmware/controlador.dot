@@ -1,0 +1,21 @@
+digraph G {
+  graph [rankdir=TB, fontname="Liberation Sans", nodesep=0.5, ranksep=0.65, pad=0.2, dpi=170];
+  node  [shape=box, style="rounded,filled", fillcolor="white", color="#333333", fontname="Liberation Sans", fontsize=12, penwidth=1.3, margin="0.18,0.10"];
+  edge  [fontname="Liberation Sans", fontsize=10, color="#444444", penwidth=1.1, arrowsize=0.8];
+
+  BOOT [label="BOOT\nGPIO26 = LOW (relé aberto, bomba desligada)\ncarrega NVS: T_MANUAL, T_MAX, timeout do heartbeat\nconecta Wi-Fi e MQTT sem bloquear (millis)"];
+  SEG  [label="SEGURO\nbomba DESLIGADA, LED vermelho aceso\nrejeita LIGAR com motivo (MODO_SEGURO)\npublica estado e motivo de entrada", fillcolor="#f2dede"];
+  AUTO [label="AUTOMÁTICO\nexecuta LIGAR/DESLIGAR com origem = regra\n(histerese 10% / 90% calculada no backend)\nLED verde aceso", fillcolor="#eeeeee"];
+  MAN  [label="MANUAL\nexecuta LIGAR/DESLIGAR com origem = manual\n(usuário admin no painel)\ntimer T_MANUAL = 5 min reinicia a cada comando", fillcolor="#eeeeee"];
+  INT  [label="INTERTRAVAMENTO (vale em AUTOMÁTICO e MANUAL)\nLIGAR só é aceito se: não está em SEGURO\nE último heartbeat tem liberaBomba = true (nível < 90%, leitura do medidor < 30 s, sensor OK)\nE tempo ligada < T_MAX = 10 min\nSe liberaBomba vira false com a bomba ligada: desliga e publica estado", shape=note, fillcolor="#fff8e1"];
+
+  BOOT -> SEG [label="  sempre, ao ligar"];
+  SEG -> AUTO [label="  3 heartbeats válidos seguidos\n  (se entrou por perda de heartbeat)\n  ou comando LIBERAR do admin\n  (se entrou por T_MAX ou falha)"];
+  AUTO -> MAN [label="  cmd LIGAR/DESLIGAR\n  origem = manual"];
+  MAN -> AUTO [label="  T_MANUAL expira\n  ou cmd MODO_AUTO"];
+  AUTO -> SEG [label="  heartbeat ausente > 30 s\n  ou ligada >= T_MAX\n  ou erro interno"];
+  MAN -> SEG [label="  heartbeat ausente > 30 s\n  ou ligada >= T_MAX"];
+  {rank=same; AUTO; MAN;}
+  AUTO -> INT [style=dashed, arrowhead=none, color="#999999"];
+  MAN -> INT [style=dashed, arrowhead=none, color="#999999"];
+}
