@@ -1,3 +1,35 @@
+# AquaNível: monitoramento e controle de caixa d'água
+
+> Projeto da Equipe 4 (catolicasc-g4), Internet das Coisas 2026/2, Prof. Edson Vaz Lopes.
+> Evolução do Medidor de Nível de Reservatório da N1 para o produto da N3 (defesa em 01/12/2026).
+
+## Problema e usuário
+
+Quem tem uma caixa d'água abastecida por bomba não sabe o nível de verdade e só percebe que a água acabou quando abre a torneira. Conferir na mão é impreciso, não deixa histórico e não avisa ninguém a distância. O usuário é quem cuida da água da casa, do prédio ou do estabelecimento (morador, síndico ou zelador).
+
+## Estado atual (herdado da N1)
+
+Um único ESP32 mede o nível com HC-SR04 corrigido pelo DS18B20, publica no MQTT, liga a bomba (LED) em 10% e desliga em 90%, aceita LIGAR/PARAR pelo painel HTML e grava as leituras no PostgreSQL pelo coletor Python, tudo subindo no Docker Compose. Detalhes da N1 nas seções abaixo.
+
+## Para onde o upgrade vai (N3)
+
+- Dois ESP32: **medidor** (rsv-medidor-01) junto à caixa e **controlador** (rsv-controlador-01) junto à bomba, com relé e mini bomba 5 V reais.
+- Backend FastAPI como único que publica comandos: valida o contrato, grava, aplica a histerese e manda heartbeat ao controlador.
+- Contrato MQTT v1 congelado em [CONTRATOS.md](CONTRATOS.md), com commandId e ciclo ENVIADO, RECEBIDO, EXECUTADO, CONFIRMADO.
+- Painel web com login e perfis, histórico, gráficos e alertas; notificação pelo Telegram.
+- Mosquitto com TLS, OTA nos dois ESP32, testes pytest com GitHub Actions.
+
+## Documentação do CP12
+
+| O quê | Onde |
+|---|---|
+| Diagrama de blocos, fluxo do dado e do comando | [docs/arquitetura](docs/arquitetura) |
+| Esquemas elétricos, mapa de pinos e BOM | [docs/hardware](docs/hardware) |
+| Fluxogramas do firmware | [docs/firmware](docs/firmware) |
+| Contrato MQTT v1 | [CONTRATOS.md](CONTRATOS.md) |
+
+---
+
 # Projeto N1 — Medidor de Nível de Água do Reservatório
 
 ## 1. Integrantes
