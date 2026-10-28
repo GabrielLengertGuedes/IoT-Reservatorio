@@ -54,3 +54,14 @@ Anote, para cada teste, o esperado, o observado e a evidência (print do serial 
 | 10 | Tempo máximo | Publique em `.../rsv-controlador-01/config` (retain) `{"v":1,"t_max_ligada_s":60}` e ligue a bomba | Após 60 s a bomba desliga, `SEGURO` com `TEMPO_MAXIMO`; heartbeats não tiram daí, só `liberar` |
 
 Para o teste 10 e para voltar ao padrão (600 s), use por exemplo o `mosquitto_pub` ou o MQTT Explorer no mesmo broker.
+
+### Tempo de reação
+
+Com o controlador em AUTOMATICO e a bomba desligada, leve o nível de acima de 10 % para 10 % ou menos (por exemplo, tire a mão de perto do sensor). O backend imprime `LATÊNCIA ...: telemetria -> EXECUTADO = N ms`. Meta: 1 a 3 s entre o nível mudar e a bomba agir. Os tempos de segurança do controlador (30 s sem heartbeat, 10 min de T_MAX) não mudam.
+
+## Pontos para a v2 do contrato
+
+O firmware e o backend de teste já fazem isto, mas o CONTRATOS.md v1 ainda não prevê:
+
+- **Telemetria por evento.** Além da periódica, o medidor publica na hora quando o nível muda 5 pontos percentuais ou mais desde a última publicação, cruza 10 % ou 90 % (limiares da regra do backend) ou o sensor muda entre `OK` e `FALHA`, com no mínimo 1 s entre publicações. O período padrão caiu de 10 s para 5 s (`periodo_s` no config do medidor). O v1 diz "a cada 10 s".
+- **Heartbeat por evento.** O backend publica um heartbeat extra na hora em que `liberaBomba` muda, antes de qualquer comando, além do de 10 s. O controlador já aceita heartbeats fora do ritmo.

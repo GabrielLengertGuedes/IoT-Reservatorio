@@ -51,8 +51,17 @@ const float PADRAO_D_VAZIO   = 23.5;   // cm do sensor ate o fundo
 const float PADRAO_D_CHEIO   = 4.0;    // cm do sensor ate o nivel maximo
 const int   PADRAO_ALERTA_BAIXO = 10;  // NIVEL_CRITICO quando nivel <= isto
 const int   PADRAO_ALERTA_ALTO  = 95;  // NIVEL_TRANSBORDO quando nivel >= isto
-const int   PADRAO_PERIODO_S    = 10;  // telemetria v1
+const int   PADRAO_PERIODO_S    = 5;   // telemetria periodica
 const float ALFA_EMA = 0.30;
+
+// Telemetria por evento: alem da periodica, sai na hora quando o nivel anda
+// 5 pontos desde a ultima publicada, cruza um limiar da regra do backend
+// (liga em <= 10%, desliga e bloqueia em >= 90%) ou o sensor muda entre OK
+// e FALHA. Nunca mais de uma por segundo, para nao inundar o broker.
+const int NIVEL_DELTA_EVENTO = 5;
+const int LIMIAR_LIGA  = 10;
+const int LIMIAR_ALTO  = 90;
+const unsigned long PUB_INTERVALO_MIN = 1000;
 
 // Faixas plausiveis do contrato. Fora delas a leitura e descartada.
 const float DIST_MIN = 2.0, DIST_MAX = 400.0;
@@ -108,6 +117,8 @@ unsigned long falhasTemp = 0;     // leituras invalidas seguidas do DS18B20
 int nivel = 0;
 bool sensorFalha = false;
 unsigned long seqTelemetria = 0;
+int nivelPublicado = -1;            // nivel da ultima telemetria (-1 = nenhuma)
+bool sensorFalhaPublicado = false;
 unsigned long tLeitura = 0, tTela = 0, tPub = 0, tPubAntigo = 0, tMqtt = 0;
 unsigned long tTempPedido = 0;
 bool tempConvertendo = false;
@@ -509,7 +520,18 @@ void publicarTelemetria() {
   t["valor"] = round(temperatura * 10) / 10.0;
   t["unidade"] = "°C";
   doc["sensor"] = sensorFalha ? "FALHA" : "OK";
-  publicarJson("telemetria", doc);
+  if (publicarJson("telemetria", doc) && temLeitura) nivelPublicado = nivel;
+  sensorFalhaPublicado = sensorFalha;
+}
+
+// Motivo para publicar fora do periodo, ou nullptr se nao ha.
+const char* motivoEvento() {
+  if (sensorFalha != sensorFalhaPublicado) return "sensor mudou";
+  if (distFiltrada < 0 || nivelPublicado < 0) return nullptr;
+  if ((nivel <= LIMIAR_LIGA) != (nivelPublicado <= LIMIAR_LIGA)) return "cruzou 10%";
+  if ((nivel >= LIMIAR_ALTO) != (nivelPublicado >= LIMIAR_ALTO)) return "cruzou 90%";
+  if (abs(nivel - nivelPublicado) >= NIVEL_DELTA_EVENTO) return "variou 5 pontos";
+  return nullptr;
 }
 
 bool enviarAlerta(const char* codigo, const char* ts, int nivelEvento) {
@@ -785,9 +807,16 @@ void loop() {
 
   if (agora - tTela >= 500) { tTela = agora; desenharTela(); }
 
-  if (mqtt.connected() && agora - tPub >= (unsigned long)periodoS * 1000UL) {
-    tPub = agora;
-    publicarTelemetria();
+  // Evento dentro do intervalo minimo fica para a proxima volta do loop: a
+  // condicao e reavaliada e sai assim que o segundo fecha.
+  if (mqtt.connected() && agora - tPub >= PUB_INTERVALO_MIN) {
+    const char* evento = motivoEvento();
+    bool periodica = agora - tPub >= (unsigned long)periodoS * 1000UL;
+    if (evento || periodica) {
+      if (evento) logSerial("telemetria por evento (%s): nivel %d%% -> %d%%", evento, nivelPublicado, nivel);
+      tPub = agora;
+      publicarTelemetria();
+    }
   }
 
   // Topicos de texto da N1, no mesmo ritmo de antes (2 s).

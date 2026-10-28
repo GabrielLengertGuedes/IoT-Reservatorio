@@ -7,8 +7,10 @@ FastAPI existir. Segue o contrato v1 (CONTRATOS.md).
 - Publica o heartbeat a cada 10 s com liberaBomba:
     false com nível >= 90 %                         (motivo NIVEL_ALTO)
     false sem leitura há mais de 30 s ou sensor FALHA (motivo SEM_LEITURA)
-- Aplica a histerese 10 %/90 % mandando cmd com origem=regra, só quando o
-  controlador está em AUTOMATICO.
+  e na hora em que liberaBomba muda, antes de qualquer comando.
+- Aplica a histerese 10 %/90 % a cada telemetria, mandando cmd com
+  origem=regra, só quando o controlador está em AUTOMATICO. Um novo cmd da
+  regra só sai depois do EXECUTADO ou REJEITADO do anterior (ou 5 s).
 - Aceita comandos no terminal (digite "ajuda").
 
     pip install paho-mqtt
@@ -33,7 +35,7 @@ LEITURA_VELHA_S = 30
 NIVEL_LIGA = 10
 NIVEL_DESLIGA = 90
 NIVEL_ALTO = 90
-ESPERA_REGRA_S = 15   # não repete o mesmo comando da regra antes disto
+TIMEOUT_REGRA_S = 5   # espera pelo EXECUTADO/REJEITADO do cmd da regra
 
 AJUDA = """comandos:
   ligar     LIGAR manual            desligar  DESLIGAR manual
@@ -49,7 +51,7 @@ def agora_iso():
 
 
 def log(msg):
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+    print(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] {msg}", flush=True)
 
 
 class Backend:
@@ -62,7 +64,10 @@ class Backend:
         self.seq_hb = 0
         self.seq_cmd = 0
         self.ultimo_cmd = None          # (topico, payload) para "repetir"
-        self.ultima_regra = (None, 0.0)  # (acao, instante)
+        self.libera_publicada = None     # (liberaBomba, motivo) do último heartbeat
+        # cmd da regra aguardando resposta: commandId, instante do envio e
+        # instante da telemetria que o disparou (para medir a latência)
+        self.cmd_regra = None
         # O que se sabe dos dispositivos
         self.telemetria = None
         self.t_telemetria = 0.0
@@ -121,12 +126,14 @@ class Backend:
             elif tipo == "ack":
                 motivo = f" motivo={dados['motivo']}" if dados.get("motivo") else ""
                 log(f"ack {dados.get('commandId')}: {dados.get('etapa')}{motivo}")
+                self.ao_ack_regra(dados)
             elif tipo == "estado":
                 self.estado = dados
                 seguro = f" ({dados.get('motivoSeguro')})" if dados.get("modo") == "SEGURO" else ""
                 ligada = (dados.get("ligadaHa") or {}).get("valor")
                 log(f"estado controlador: modo={dados.get('modo')}{seguro} bomba={dados.get('bomba')}"
                     f" ligadaHa={ligada}s ultimoCommandId={dados.get('ultimoCommandId')}")
+                self.aplicar_regra()
 
     def ao_telemetria(self, dados):
         self.telemetria = dados
@@ -136,7 +143,8 @@ class Backend:
         temp = (dados.get("temperatura") or {}).get("valor")
         log(f"telemetria seq={dados.get('seq')}: nível={nivel} % dist={dist} cm "
             f"temp={temp} °C sensor={dados.get('sensor')}")
-        self.aplicar_regra()
+        self.verificar_liberacao()
+        self.aplicar_regra(self.t_telemetria)
 
     # ---------- decisão ----------
     def liberacao(self):
@@ -153,7 +161,27 @@ class Backend:
             return False, "NIVEL_ALTO"
         return True, None
 
-    def aplicar_regra(self):
+    def verificar_liberacao(self):
+        """Publica o heartbeat na hora se liberaBomba mudou desde o último."""
+        if not self.heartbeat_ativo or self.libera_publicada is None:
+            return
+        atual = self.liberacao()
+        if atual[0] != self.libera_publicada[0]:
+            log(f"liberaBomba mudou para {str(atual[0]).lower()}: heartbeat imediato")
+            self.publicar_heartbeat()
+
+    def ao_ack_regra(self, dados):
+        if not self.cmd_regra or dados.get("commandId") != self.cmd_regra[0]:
+            return
+        if dados.get("etapa") not in ("EXECUTADO", "REJEITADO"):
+            return
+        cid, t_envio, t_origem = self.cmd_regra
+        agora = time.time()
+        origem = f"telemetria -> {dados.get('etapa')} = {(agora - t_origem) * 1000:.0f} ms, " if t_origem else ""
+        log(f"LATÊNCIA {cid}: {origem}cmd -> {dados.get('etapa')} = {(agora - t_envio) * 1000:.0f} ms")
+        self.cmd_regra = None
+
+    def aplicar_regra(self, t_origem=None):
         """Histerese 10 %/90 %, só com o controlador em AUTOMATICO."""
         if self.args.sem_medidor or not self.estado or self.estado.get("modo") != "AUTOMATICO":
             return
@@ -169,12 +197,13 @@ class Backend:
             acao = "DESLIGAR"
         if acao is None:
             return
-        ultima, quando = self.ultima_regra
-        if ultima == acao and time.time() - quando < ESPERA_REGRA_S:
-            return
-        self.ultima_regra = (acao, time.time())
+        if self.cmd_regra:
+            if time.time() - self.cmd_regra[1] < TIMEOUT_REGRA_S:
+                return
+            log(f"cmd {self.cmd_regra[0]}: sem EXECUTADO/REJEITADO em {TIMEOUT_REGRA_S} s, liberando a regra")
         log(f"REGRA: nível {nivel} % com bomba {bomba} -> {acao}")
-        self.enviar_cmd(acao, "regra")
+        cid = self.enviar_cmd(acao, "regra")
+        self.cmd_regra = (cid, time.time(), t_origem)
 
     # ---------- publicação ----------
     def enviar_cmd(self, acao, origem):
@@ -190,6 +219,7 @@ class Backend:
         self.ultimo_cmd = (topico, payload, cid)
         self.cliente.publish(topico, payload, qos=1, retain=False)
         log(f"cmd {cid}: {acao} origem={origem} ENVIADO")
+        return cid
 
     def repetir_cmd(self):
         if not self.ultimo_cmd:
@@ -208,11 +238,16 @@ class Backend:
                     if self.heartbeat_ativo:
                         self.publicar_heartbeat()
                     self.aplicar_regra()
+            else:
+                # A liberação também muda sozinha quando a leitura envelhece.
+                with self.trava:
+                    self.verificar_liberacao()
             time.sleep(0.2)
 
     def publicar_heartbeat(self):
         self.seq_hb += 1
         libera, motivo = self.liberacao()
+        self.libera_publicada = (libera, motivo)
         payload = json.dumps({"v": 1, "ts": agora_iso(), "seq": self.seq_hb,
                               "liberaBomba": libera, "motivo": motivo})
         self.cliente.publish(self.topico("backend", "heartbeat"), payload, qos=0, retain=False)
