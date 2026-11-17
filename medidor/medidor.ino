@@ -8,6 +8,8 @@
 //
 // O alerta local (LCD e buzzer) e calculado aqui mesmo, a partir da leitura,
 // entao continua funcionando sem Wi-Fi e sem broker.
+//
+// Aceita firmware novo pelo Wi-Fi (ArduinoOTA, com senha); ver ota.sh.
 #include <WiFi.h>
 #include "credenciais.h"   // copie de credenciais.exemplo.h; nao e versionado
 #if MQTT_TLS
@@ -15,6 +17,7 @@
 #endif
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
+#include <ArduinoOTA.h>
 #include <Preferences.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
@@ -24,7 +27,11 @@
 #include <stdarg.h>
 
 #define DEVICE_ID "rsv-medidor-01"
-#define FW_VERSAO "2.0.0"
+#define FW_VERSAO "2.1.1"
+
+#ifndef OTA_SENHA
+  #error "defina OTA_SENHA no credenciais.h (modelo em credenciais.exemplo.h)"
+#endif
 
 // ---------- pinos ----------
 // O HC-SR04 e alimentado com 5V, entao o ECHO responde em 5V. Nenhum pino do
@@ -139,6 +146,8 @@ bool wifiConectado = false, horaSincronizada = false;
 unsigned long tWifi = 0, tTentativa = 0, tQueda = 0, tSemWifi = 0, tStatus = 0;
 unsigned long esperaWifi = WIFI_ESPERA_INICIAL;
 unsigned long tentativasWifi = 0, quedasWifi = 0;
+bool otaIniciado = false;
+bool otaGravando = false;   // entre o onStart e o fim da gravacao
 
 // ---------- log carimbado ----------
 // Toda linha sai com [data hora | uptime] na frente, para conferir o log com
@@ -234,6 +243,10 @@ void iniciarWifi() {
   WiFi.mode(WIFI_STA);
   WiFi.persistent(false);        // nao regrava as credenciais na flash a cada boot
   WiFi.setAutoReconnect(false);  // a reconexao e feita por supervisionarWifi()
+  // Sem economia de energia no radio: a placa vive no USB, e com o modem
+  // dormindo o OTA engasga (pausas de mais de 10 s derrubam a gravacao) e o
+  // MQTT demora mais para entregar.
+  WiFi.setSleep(false);
   logSerial("Wi-Fi: associando ao SSID \"%s\" e pedindo endereco por DHCP...", SSID);
   WiFi.begin(SSID, SENHA);
   tTentativa = millis();
@@ -260,6 +273,7 @@ void aoConectarWifi() {
     configTime(NTP_FUSO, 0, "pool.ntp.org", "a.st1.ntp.br");
     logSerial("NTP: pedindo a hora certa para carimbar as proximas linhas");
   }
+  iniciarOta();
 }
 
 // Caminho unico para registrar a perda, venha de uma queda real ou do
@@ -768,6 +782,94 @@ void conectarMqtt() {
   }
 }
 
+// ---------- OTA (gravacao pelo Wi-Fi) ----------
+// Durante a gravacao o loop fica parado dentro do ArduinoOTA.handle(): sem
+// medicao e sem telemetria. Antes de comecar, o medidor se declara offline no
+// status (retain); o backend responde na hora com liberaBomba=false
+// (SEM_LEITURA), entao a bomba nao liga as cegas enquanto o medidor grava.
+// Depois do reboot o status volta a online:true na conexao com o broker.
+void mostrarOta(const char* l1, const char* l2) {
+  if (tipoTela != TELA_LCD) return;
+  char a[17], b[17];
+  snprintf(a, sizeof(a), "%-16s", l1);
+  snprintf(b, sizeof(b), "%-16s", l2);
+  lcd->setCursor(0, 0); lcd->print(a);
+  lcd->setCursor(0, 1); lcd->print(b);
+}
+
+void aoIniciarOta() {
+  otaGravando = true;
+  logSerial("OTA: recebendo firmware novo pelo Wi-Fi (atual: %s)", FW_VERSAO);
+  pararBuzzer();
+  if (mqtt.connected()) {
+    JsonDocument st;
+    st["v"] = 1;
+    st["deviceId"] = DEVICE_ID;
+    st["online"] = false;
+    publicarJson("status", st, true);
+    pubAntigo("status", "offline", true);
+    mqtt.loop();
+  }
+  mostrarOta("Atualizando...", "fw pelo Wi-Fi");
+}
+
+void aoProgressoOta(unsigned int feito, unsigned int total) {
+  static int ultimo = -1;
+  int pct = total ? (int)(feito * 100ULL / total) : 0;
+  if (pct / 5 == ultimo / 5) return;   // LCD a cada 5 %, log a cada 10 %
+  if (pct / 10 != ultimo / 10) logSerial("OTA: %d%%", pct);
+  ultimo = pct;
+  char l2[17];
+  snprintf(l2, sizeof(l2), "%3d%%", pct);
+  mostrarOta("Atualizando...", l2);
+}
+
+void aoTerminarOta() {
+  logSerial("OTA: firmware gravado, reiniciando");
+  mostrarOta("Atualizado!", "Reiniciando...");
+}
+
+const char* nomeErroOta(ota_error_t e) {
+  switch (e) {
+    case OTA_AUTH_ERROR:    return "senha errada";
+    case OTA_BEGIN_ERROR:   return "sem espaco para o firmware";
+    case OTA_CONNECT_ERROR: return "sem conexao com o computador";
+    case OTA_RECEIVE_ERROR: return "falha ao receber";
+    case OTA_END_ERROR:     return "falha ao finalizar";
+    default:                return "erro desconhecido";
+  }
+}
+
+// Se a gravacao ja tinha comecado, o firmware anterior continua gravado, mas
+// o status ja saiu como offline e o buzzer foi calado. Reiniciar e o caminho mais curto para
+// voltar a medir, publicar online:true e retomar o buzzer do alerta vigente.
+void aoErroOta(ota_error_t e) {
+  // Erro antes do onStart (senha errada, convite que nao seguiu): nada foi
+  // gravado nem anunciado, entao so registra e segue medindo.
+  if (!otaGravando) { logSerial("OTA: recusado (%s), nada mudou", nomeErroOta(e)); return; }
+  logSerial("OTA: FALHOU (%s), firmware anterior mantido, reiniciando", nomeErroOta(e));
+  mostrarOta("OTA falhou", "Reiniciando...");
+  delay(2000);
+  ESP.restart();
+}
+
+void prepararOta() {
+  ArduinoOTA.setHostname(DEVICE_ID);   // aparece como rsv-medidor-01.local
+  ArduinoOTA.setPassword(OTA_SENHA);
+  ArduinoOTA.onStart(aoIniciarOta);
+  ArduinoOTA.onProgress(aoProgressoOta);
+  ArduinoOTA.onEnd(aoTerminarOta);
+  ArduinoOTA.onError(aoErroOta);
+}
+
+// Chamado a cada conexao do Wi-Fi: depois de uma queda o mDNS precisa subir de novo.
+void iniciarOta() {
+  if (otaIniciado) ArduinoOTA.end();
+  ArduinoOTA.begin();
+  otaIniciado = true;
+  logSerial("OTA pronto: %s.local ou %s, porta 3232", DEVICE_ID, WiFi.localIP().toString().c_str());
+}
+
 void setup() {
   // Buzzer calado antes de qualquer outra coisa.
   pinMode(PIN_BUZZER, OUTPUT); digitalWrite(PIN_BUZZER, LOW);
@@ -780,6 +882,7 @@ void setup() {
   pinMode(PIN_TRIG, OUTPUT); pinMode(PIN_ECHO, INPUT);
 
   carregarConfig();
+  prepararOta();
 
   Wire.begin(I2C_SDA, I2C_SCL);
   uint8_t ender = varrerI2C("boot");
@@ -832,6 +935,7 @@ void loop() {
 
   atualizarBuzzer();
   supervisionarWifi();
+  if (wifiConectado) ArduinoOTA.handle();
   lerSerial();
   conectarMqtt();
   mqtt.loop();

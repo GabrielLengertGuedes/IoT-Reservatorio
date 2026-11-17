@@ -36,3 +36,8 @@
 // Prefixo dos tópicos. Com broker próprio não há colisão com outras
 // equipes, mas o coletor e o painel assinam exatamente este prefixo.
 #define MQTT_PREFIXO "catolicasc-g4/reservatorio"
+
+// ---------- OTA (gravação pelo Wi-Fi) ----------
+// Senha que o ArduinoOTA pede antes de aceitar um firmware novo. O ./ota.sh
+// lê a senha daqui. Trocar a senha exige gravar a placa de novo.
+#define OTA_SENHA "troque-aqui"

@@ -9,6 +9,9 @@
 //   .../rsv-controlador-01/config    parametros (retain), gravados na NVS
 // e publica ack, estado (retain) e status (Last Will).
 //
+// Aceita firmware novo pelo Wi-Fi (ArduinoOTA, com senha). Antes de gravar,
+// desliga a bomba e entra em SEGURO com motivo OTA; ver ota.sh.
+//
 // Tudo com millis(), sem delay no loop: a protecao por tempo nao pode
 // esperar a rede.
 #include <WiFi.h>
@@ -18,12 +21,17 @@
 #endif
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
+#include <ArduinoOTA.h>
 #include <Preferences.h>
 #include <time.h>
 #include <stdarg.h>
 
 #define DEVICE_ID "rsv-controlador-01"
-#define FW_VERSAO "1.0.0"
+#define FW_VERSAO "1.1.2"
+
+#ifndef OTA_SENHA
+  #error "defina OTA_SENHA no credenciais.h (modelo em credenciais.exemplo.h)"
+#endif
 
 // ---------- pinos ----------
 // GPIO26 ALTO = bomba ligada. Em reset o pino fica em alta impedancia e o
@@ -104,6 +112,8 @@ unsigned long esperaWifi = WIFI_ESPERA_INICIAL;
 unsigned long tentativasWifi = 0, quedasWifi = 0;
 unsigned long backoff = 1000;
 unsigned long tLeds = 0;
+bool otaIniciado = false;
+bool otaGravando = false;   // entre o onStart e o fim da gravacao
 
 // ---------- log carimbado ----------
 void carimbo(char* saida, size_t n) {
@@ -187,6 +197,10 @@ void iniciarWifi() {
   WiFi.mode(WIFI_STA);
   WiFi.persistent(false);
   WiFi.setAutoReconnect(false);  // a reconexao e feita por supervisionarWifi()
+  // Sem economia de energia no radio: a placa vive no USB, e com o modem
+  // dormindo o OTA engasga (pausas de mais de 10 s derrubam a gravacao) e o
+  // MQTT demora mais para entregar.
+  WiFi.setSleep(false);
   logSerial("Wi-Fi: associando ao SSID \"%s\" e pedindo endereco por DHCP...", SSID);
   WiFi.begin(SSID, SENHA);
   tTentativa = millis();
@@ -213,6 +227,7 @@ void aoConectarWifi() {
     configTime(NTP_FUSO, 0, "pool.ntp.org", "a.st1.ntp.br");
     logSerial("NTP: pedindo a hora certa");
   }
+  iniciarOta();
 }
 
 void registrarQueda(const char* motivo) {
@@ -628,6 +643,71 @@ void conectarMqtt() {
   }
 }
 
+// ---------- OTA (gravacao pelo Wi-Fi) ----------
+// Durante a gravacao o loop fica parado dentro do ArduinoOTA.handle(), entao
+// nada de heartbeat, comando ou protecao por tempo. Por isso a bomba desliga
+// e o controlador entra em SEGURO antes de o primeiro byte chegar. Se a
+// gravacao falhar, o firmware anterior continua e o controlador fica em
+// SEGURO/OTA_FALHOU; sai sozinho com heartbeats, como no BOOT. Se der certo,
+// reinicia e o boot ja e seguro (GPIO26 em LOW, SEGURO/BOOT).
+const char* nomeErroOta(ota_error_t e) {
+  switch (e) {
+    case OTA_AUTH_ERROR:    return "senha errada";
+    case OTA_BEGIN_ERROR:   return "sem espaco para o firmware";
+    case OTA_CONNECT_ERROR: return "sem conexao com o computador";
+    case OTA_RECEIVE_ERROR: return "falha ao receber";
+    case OTA_END_ERROR:     return "falha ao finalizar";
+    default:                return "erro desconhecido";
+  }
+}
+
+void aoIniciarOta() {
+  otaGravando = true;
+  logSerial("OTA: recebendo firmware novo pelo Wi-Fi (atual: %s)", FW_VERSAO);
+  entrarSeguro("OTA");   // desliga a bomba e publica o estado
+  mqtt.loop();
+  digitalWrite(PIN_LED_SEG, HIGH);
+  digitalWrite(PIN_LED_OK, LOW);
+}
+
+void aoProgressoOta(unsigned int feito, unsigned int total) {
+  static int ultimo = -1;
+  int pct = total ? (int)(feito * 100ULL / total) : 0;
+  digitalWrite(PIN_LED_OK, (pct / 2) % 2 ? HIGH : LOW);   // verde pisca enquanto grava
+  if (pct / 10 != ultimo / 10) { ultimo = pct; logSerial("OTA: %d%%", pct); }
+}
+
+void aoTerminarOta() {
+  digitalWrite(PIN_BOMBA, LOW);
+  logSerial("OTA: firmware gravado, reiniciando");
+}
+
+void aoErroOta(ota_error_t e) {
+  // Erro antes do onStart (senha errada, convite que nao seguiu): nada foi
+  // gravado e a bomba nem chegou a desligar, entao so registra.
+  if (!otaGravando) { logSerial("OTA: recusado (%s), nada mudou", nomeErroOta(e)); return; }
+  otaGravando = false;
+  logSerial("OTA: FALHOU (%s), firmware anterior mantido", nomeErroOta(e));
+  entrarSeguro("OTA_FALHOU");
+}
+
+void prepararOta() {
+  ArduinoOTA.setHostname(DEVICE_ID);   // aparece como rsv-controlador-01.local
+  ArduinoOTA.setPassword(OTA_SENHA);
+  ArduinoOTA.onStart(aoIniciarOta);
+  ArduinoOTA.onProgress(aoProgressoOta);
+  ArduinoOTA.onEnd(aoTerminarOta);
+  ArduinoOTA.onError(aoErroOta);
+}
+
+// Chamado a cada conexao do Wi-Fi: depois de uma queda o mDNS precisa subir de novo.
+void iniciarOta() {
+  if (otaIniciado) ArduinoOTA.end();
+  ArduinoOTA.begin();
+  otaIniciado = true;
+  logSerial("OTA pronto: %s.local ou %s, porta 3232", DEVICE_ID, WiFi.localIP().toString().c_str());
+}
+
 void setup() {
   // Primeira coisa: bomba desligada. Nada antes disto pode atrasar o LOW.
   pinMode(PIN_BOMBA, OUTPUT);
@@ -643,6 +723,7 @@ void setup() {
   logSerial("Comandos do monitor serial: STATUS | QUEDA");
 
   carregarConfig();
+  prepararOta();
   snprintf(topicoCmd, sizeof(topicoCmd), "%s/%s/cmd", PREFIXO, DEVICE_ID);
   snprintf(topicoConfig, sizeof(topicoConfig), "%s/%s/config", PREFIXO, DEVICE_ID);
   snprintf(topicoHb, sizeof(topicoHb), "%s/backend/heartbeat", PREFIXO);
@@ -665,6 +746,7 @@ void loop() {
   atualizarLeds();
   if (agora - tStatus >= 10000) { tStatus = agora; imprimirStatus(); }
   supervisionarWifi();
+  if (wifiConectado) ArduinoOTA.handle();
   lerSerial();
   conectarMqtt();
   mqtt.loop();

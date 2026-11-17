@@ -36,6 +36,34 @@ O medidor só mede e alerta; o controlador só executa. Os dois **não têm fio 
 4. Monitor serial a 115200: `arduino-cli monitor -p COMy -c baudrate=115200`. Comandos no monitor: medidor `QUEDA | STATUS | I2C`; controlador `STATUS | QUEDA`.
 5. Backend: `pip install paho-mqtt` e `python backend-teste/backend_teste.py` (padrão `broker.hivemq.com:1883`; opções `--broker`, `--porta`, `--sem-medidor`). No terminal: `ligar`, `desligar`, `auto`, `liberar`, `repetir`, `pausa`, `volta`, `status`, `sair`.
 
+## Gravar pelo Wi-Fi (OTA)
+
+A partir do medidor 2.1.0 e do controlador 1.1.0 os dois aceitam firmware novo pelo Wi-Fi (ArduinoOTA, porta 3232, com senha). A primeira versão com OTA precisa ser gravada por USB, como acima; daí em diante não precisa mais de cabo.
+
+Preparação (uma vez por computador):
+
+1. No `credenciais.h`, defina `OTA_SENHA` (modelo no `credenciais.exemplo.h`). A senha vai embutida no firmware: trocar a senha exige gravar de novo.
+2. No PowerShell **como administrador**: `powershell -ExecutionPolicy Bypass -File .\liberar-firewall.ps1`. Libera a entrada na 3233/TCP (a placa se conecta de volta ao computador nessa porta para baixar o firmware) e na 5353/UDP (mDNS).
+3. O computador precisa estar na mesma rede dos ESP32 (o hotspot do celular).
+4. Se houver antivírus com firewall próprio (no PC da equipe, o Avast), marque a rede do hotspot como confiável nele também. Sintoma: o `ota.sh` mostra `Authenticating... OK` e depois `No response from device`, e o serial da placa mostra `OTA: FALHOU (sem conexao com o computador)`.
+
+Para gravar:
+
+1. Mude o `FW_VERSAO` no `.ino` (por exemplo, `2.1.0` para `2.1.1`), para a troca aparecer no painel.
+2. Compile: `./compilar.sh medidor` (ou `controlador`).
+3. Grave: `./ota.sh medidor` (acha a placa por `rsv-medidor-01.local`) ou `./ota.sh medidor 10.28.198.51` com o IP que o painel mostra. O script lê a senha do `credenciais.h` e mostra o progresso.
+
+Na Arduino IDE também funciona: a placa aparece em *Ferramentas > Porta* como porta de rede `rsv-medidor-01` ou `rsv-controlador-01`, e a IDE pede a senha.
+
+O que acontece durante a gravação (o loop fica parado enquanto o firmware chega, cerca de 20 a 40 s):
+
+| Placa | Antes de gravar | Durante | Depois |
+|---|---|---|---|
+| Controlador | Desliga a bomba (GPIO26 em LOW) e publica `estado` com `modo=SEGURO`, `motivoSeguro=OTA` | LED vermelho aceso, verde piscando; serial mostra o percentual | Reinicia em `SEGURO/BOOT` e sai sozinho com 3 heartbeats. Se a gravação falhar, o firmware anterior continua e o estado fica `SEGURO/OTA_FALHOU`, que também sai com 3 heartbeats |
+| Medidor | Cala o buzzer e publica `status` com `online:false`; o backend responde na hora com `liberaBomba=false` (`SEM_LEITURA`) | LCD mostra `Atualizando...` e o percentual | Reinicia e publica `online:true` com o `fw` novo. Se falhar, mostra `OTA falhou` e reinicia com o firmware anterior |
+
+Teste da defesa: com o painel aberto, grave o controlador por OTA. Esperado: bomba desliga, alerta `MODO_SEGURO` ("atualização de firmware pelo Wi-Fi em andamento"), controlador some e volta com o `fw` novo, e em cerca de 30 s está de novo em `AUTOMATICO`.
+
 ## Roteiro de testes
 
 Anote, para cada teste, o esperado, o observado e a evidência (print do serial e do terminal do backend).
@@ -66,3 +94,4 @@ O firmware e o backend de teste já fazem isto, mas o CONTRATOS.md v1 ainda não
 - **Telemetria por evento.** Além da periódica, o medidor publica na hora quando o nível muda 5 pontos percentuais ou mais desde a última publicação, cruza 10 % ou 90 % (limiares da regra do backend) ou o sensor muda entre `OK` e `FALHA`, com no mínimo 1 s entre publicações. O período padrão caiu de 10 s para 5 s (`periodo_s` no config do medidor). O v1 diz "a cada 10 s".
 - **Heartbeat por evento.** O backend publica um heartbeat extra na hora em que `liberaBomba` muda, antes de qualquer comando, além do de 10 s. O controlador já aceita heartbeats fora do ritmo.
 - **Margem no `liberaBomba`.** O backend bloqueia com `NIVEL_ALTO` em 90 % ou mais e só volta a liberar quando o nível cai para 87 % ou menos (constantes `NIVEL_ALTO` e `NIVEL_LIBERA` no topo do `backend_teste.py`). O v1 diz só "false quando o nível está em 90 % ou mais"; sem a margem, um nível oscilando em torno de 90 % alternava a liberação a cada telemetria.
+- **Gravação pelo Wi-Fi (OTA).** Dois valores novos de `motivoSeguro` no `estado` do controlador: `OTA` (gravação em andamento, bomba desligada) e `OTA_FALHOU` (firmware anterior mantido; sai do SEGURO com 3 heartbeats, como `BOOT`). O medidor publica `status` com `online:false` antes de gravar, para o backend tirar a liberação da bomba na hora em vez de esperar a leitura envelhecer 30 s.
