@@ -15,3 +15,13 @@ pgadmin/pgpass
 
 # Enunciados e materiais da disciplina
 *.pdf
+
+# Raízes de antivírus/proxy desta máquina (ver backend/ca-extra/LEIAME.md)
+backend/ca-extra/*.crt
+
+# Cache do Python
+__pycache__/
+.pytest_cache/
+
+# Cópia do backend antigo (26/10) recuperada do Docker, só para consulta
+backend-antigo-2026-10-26/

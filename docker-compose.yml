@@ -4,14 +4,16 @@
 #   mosquitto  -> broker local (ESP32, painel e coletor ligam
 #                 nele) + bridge opcional para um broker remoto
 #   postgres   -> armazenamento
-#   collector  -> assina o broker local e grava no banco
+#   backend    -> FastAPI: valida, grava, decide a bomba, serve
+#                 a API e o painel em http://localhost:8000
+#   collector  -> coletor da N1, só com --profile n1
 # ============================================================
 
 services:
 
   postgres:
     image: postgres:16
-    container_name: reservatorio-db
+    container_name: aquanivel-db
     restart: unless-stopped
     environment:
       TZ: ${TZ}
@@ -35,7 +37,7 @@ services:
 
   mosquitto:
     image: eclipse-mosquitto:2
-    container_name: reservatorio-mqtt
+    container_name: aquanivel-mqtt
     restart: unless-stopped
     environment:
       TZ: ${TZ}
@@ -100,10 +102,51 @@ services:
 
         exec mosquitto -c /tmp/mosquitto.conf
 
+  # Backend da N3 (FastAPI + aiomqtt): assina o broker, valida contra o
+  # contrato, grava no banco, decide a bomba e serve a API e o painel.
+  backend:
+    build: ./backend
+    container_name: aquanivel-backend
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT_INTERNO: 5432
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      MQTT_HOST: ${BACKEND_MQTT_HOST:-mosquitto}
+      MQTT_PORT: ${BACKEND_MQTT_PORT:-1883}
+      MQTT_TLS: ${BACKEND_MQTT_TLS:-false}
+      MQTT_CA: ${BACKEND_MQTT_CA:-}
+      MQTT_USUARIO: ${BACKEND_MQTT_USUARIO:-}
+      MQTT_SENHA: ${BACKEND_MQTT_SENHA:-}
+      MQTT_PREFIXO: ${MQTT_PREFIXO}
+      JWT_SEGREDO: ${JWT_SEGREDO}
+      ADMIN_USUARIO: ${ADMIN_USUARIO}
+      ADMIN_SENHA: ${ADMIN_SENHA}
+      VISUALIZADOR_USUARIO: ${VISUALIZADOR_USUARIO:-}
+      VISUALIZADOR_SENHA: ${VISUALIZADOR_SENHA:-}
+      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      PAINEL_DIR: /painel
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - ./painel:/painel:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+
+  # Coletor da N1, substituído pelo backend. Fica disponível só sob
+  # demanda: docker compose --profile n1 up -d collector
   collector:
     build: ./collector
-    container_name: reservatorio-collector
+    container_name: aquanivel-collector
     restart: unless-stopped
+    profiles: ["n1"]
     environment:
       TZ: ${TZ}
       # ESP32 publica no broker publico, nao no Mosquitto local -- o
@@ -128,7 +171,7 @@ services:
   # captura — é só ferramenta de apoio para a demonstração.
   pgadmin:
     image: dpage/pgadmin4:8.14
-    container_name: reservatorio-pgadmin
+    container_name: aquanivel-pgadmin
     restart: unless-stopped
     environment:
       TZ: ${TZ}
