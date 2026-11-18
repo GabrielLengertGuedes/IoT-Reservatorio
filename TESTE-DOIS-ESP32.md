@@ -14,13 +14,13 @@ O medidor só mede e alerta; o controlador só executa. Os dois **não têm fio 
 | GPIO4 | DS18B20 dados, pull-up de 4,7 kΩ para 3,3 V (sensor em 3,3 V) |
 | GPIO21 / GPIO22 | LCD 16x2 I2C (PCF8574) SDA / SCL |
 | GPIO27 | Buzzer |
-| GPIO26 | livre (o LED da bomba saiu desta placa) |
+| GPIO26 | livre (a bomba saiu desta placa e foi para o controlador) |
 
 **ESP32 controlador (rsv-controlador-01)**, a placa nova:
 
 | Pino | Ligado a |
 |---|---|
-| GPIO26 | Bomba: hoje LED de teste com resistor; depois In1 do relé JQC3F-03VDC (DC+ no 3V3, DC- no GND, jumper em High). ALTO = bomba ligada |
+| GPIO26 | Bomba: In1 do relé JQC3F-03VDC (DC+ no 3V3, DC- no GND, jumper em High); a bomba tem alimentação própria pelo contato do relé. ALTO = bomba ligada |
 | GPIO25 | LED verde (opcional): aceso em AUTOMATICO, piscando em MANUAL |
 | GPIO27 | LED vermelho (opcional): aceso em SEGURO |
 
@@ -72,7 +72,7 @@ Anote, para cada teste, o esperado, o observado e a evidência (print do serial 
 |---|---|---|---|
 | 1 | Boot seguro | Ligue o controlador com o backend parado | GPIO26 em LOW desde o início, LED vermelho aceso, `estado` com `modo=SEGURO`, `motivoSeguro=BOOT`. Nada liga sozinho |
 | 2 | Saída do SEGURO | Rode o backend | Após 3 heartbeats válidos seguidos (~20 a 30 s) o serial mostra `SAINDO do SEGURO` e o estado vira `AUTOMATICO` |
-| 3 | Ligar e desligar manual | `ligar` e depois `desligar` | Acks `RECEBIDO` e `EXECUTADO`, LED do GPIO26 acende e apaga, `modo=MANUAL`. Após 5 min sem comando (ou com `auto`) volta a `AUTOMATICO` |
+| 3 | Ligar e desligar manual | `ligar` e depois `desligar` | Acks `RECEBIDO` e `EXECUTADO`, relé do GPIO26 arma e desarma (a bomba liga e desliga), `modo=MANUAL`. Após 5 min sem comando (ou com `auto`) volta a `AUTOMATICO` |
 | 4 | Heartbeat perdido | Com a bomba ligada, digite `pausa` | Em até 30 s a bomba desliga e o estado vira `SEGURO` com `motivoSeguro=SEM_HEARTBEAT`. `volta` tira do SEGURO depois de 3 heartbeats |
 | 5 | LIGAR em SEGURO | Com o controlador em SEGURO, `ligar` | `ack` `REJEITADO` com `motivo=MODO_SEGURO`, bomba continua desligada |
 | 6 | Comando duplicado | `ligar` e logo depois `repetir` | O segundo recebe `REJEITADO` com `motivo=COMANDO_DUPLICADO` e não executa de novo |

@@ -1,7 +1,7 @@
 """
 Tabelas do backend (SQLAlchemy). O esquema é criado e versionado pelo
 Alembic (backend/alembic/versions); este arquivo só descreve as tabelas
-para o código. As tabelas leituras e eventos do coletor da N1 (db/init.sql)
+para o código. As tabelas leituras e eventos do coletor da N1 (n1/db/init.sql)
 continuam no banco, sem uso pelo backend.
 """
 
