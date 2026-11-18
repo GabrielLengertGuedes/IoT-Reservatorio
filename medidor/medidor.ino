@@ -12,9 +12,7 @@
 // Aceita firmware novo pelo Wi-Fi (ArduinoOTA, com senha); ver ota.sh.
 #include <WiFi.h>
 #include "credenciais.h"   // copie de credenciais.exemplo.h; nao e versionado
-#if MQTT_TLS
-  #include <WiFiClientSecure.h>
-#endif
+#include "broker_tls.h"    // TLS com o broker do projeto, achado por mDNS
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <ArduinoOTA.h>
@@ -27,7 +25,7 @@
 #include <stdarg.h>
 
 #define DEVICE_ID "rsv-medidor-01"
-#define FW_VERSAO "2.1.1"
+#define FW_VERSAO "2.2.0"
 
 #ifndef OTA_SENHA
   #error "defina OTA_SENHA no credenciais.h (modelo em credenciais.exemplo.h)"
@@ -37,8 +35,8 @@
 // O HC-SR04 e alimentado com 5V, entao o ECHO responde em 5V. Nenhum pino do
 // ESP32 e 5V-tolerante, por isso o ECHO chega no GPIO34 por um divisor
 // resistivo. O GPIO34 e entrada pura, sem pull-up nem pull-down interno,
-// entao nada disputa com o divisor. O GPIO26 ficou livre: o LED da bomba
-// saiu deste ESP32 e foi para o controlador.
+// entao nada disputa com o divisor. O GPIO26 ficou livre: a bomba saiu
+// deste ESP32 e foi para o controlador (rele no GPIO26 de la).
 #define PIN_TRIG    33
 #define PIN_ECHO    34
 #define PIN_TEMP    4
@@ -86,7 +84,11 @@ const int MARGEM_NORMALIZA = 2;
 // ---------- rede ----------
 const char* SSID    = WIFI_SSID;
 const char* SENHA   = WIFI_SENHA;
+#if MQTT_TLS
+const char* BROKER  = BROKER_HOST;
+#else
 const char* BROKER  = MQTT_BROKER;
+#endif
 const int   PORTA   = MQTT_PORTA;
 const char* PREFIXO = MQTT_PREFIXO;
 
@@ -95,9 +97,10 @@ const unsigned long WIFI_ESPERA_MAXIMA  = 30000;
 const long NTP_FUSO = -3 * 3600;   // horario de Brasilia (UTC-3), so para o log
 
 #if MQTT_TLS
-WiFiClientSecure net;
-const char* MQTT_USER = MQTT_USUARIO;
-const char* MQTT_PASS = MQTT_SENHA;
+// Usuario do broker = deviceId; a ACL do broker so libera os topicos dele.
+ClienteBroker net;
+const char* MQTT_USER = DEVICE_ID;
+const char* MQTT_PASS = MQTT_SENHA_MEDIDOR;
 #else
 WiFiClient net;
 const char* MQTT_USER = nullptr;
@@ -511,6 +514,9 @@ bool publicarJson(const char* sufixo, JsonDocument& doc, bool retained = false) 
 // Topicos de texto da N1, mantidos durante a transicao para o painel e o
 // coletor antigos continuarem funcionando.
 void pubAntigo(const char* sufixo, const char* payload, bool retained = false) {
+#if MQTT_TLS
+  return;   // o broker do projeto (ACL) nao aceita mais os topicos da N1
+#endif
   if (!mqtt.connected()) return;
   char topico[100];
   snprintf(topico, sizeof(topico), "%s/%s", PREFIXO, sufixo);
@@ -706,8 +712,41 @@ void desenharTela() {
 }
 
 // ---------- comandos digitados no monitor serial ----------
+// BROKER           mostra o IP de reserva
+// BROKER <ip>      grava o IP do computador do broker na NVS (plano B do mDNS)
+// BROKER APAGAR    apaga o IP de reserva
+void comandoBroker(String arg) {
+#if MQTT_TLS
+  arg.trim();
+  if (arg.length() == 0) {
+    IPAddress salvo = brokerSalvo();
+    logSerial("BROKER: procura %s pelo mDNS; IP de reserva na NVS: %s", BROKER,
+              (uint32_t)salvo ? salvo.toString().c_str() : "nenhum");
+    return;
+  }
+  if (arg == "APAGAR") {
+    salvarBroker(IPAddress());
+    logSerial("BROKER: IP de reserva apagado");
+    return;
+  }
+  IPAddress ip;
+  if (!ip.fromString(arg)) {
+    logSerial("BROKER: IP invalido \"%s\" (exemplo: BROKER 10.21.166.151)", arg.c_str());
+    return;
+  }
+  salvarBroker(ip);
+  logSerial("BROKER: IP de reserva %s gravado na NVS, reconectando", ip.toString().c_str());
+  mqtt.disconnect();
+  backoff = 1000;
+  tMqtt = millis() - backoff;
+#else
+  logSerial("BROKER: so vale com MQTT_TLS 1 no credenciais.h");
+#endif
+}
+
 void processarComandoSerial(String c) {
   c.trim(); c.toUpperCase();
+  if (c.startsWith("BROKER")) { comandoBroker(c.substring(6)); return; }
   if (c == "QUEDA") {
     logSerial("COMANDO \"QUEDA\": derrubando o Wi-Fi de proposito para testar a reconexao");
     registrarQueda("desconexao provocada pelo comando QUEDA no monitor serial");
@@ -718,7 +757,7 @@ void processarComandoSerial(String c) {
     uint8_t ender = varrerI2C("comando");
     if (ender && tipoTela == SEM_TELA) iniciarTela(ender);
   } else {
-    logSerial("comando \"%s\" desconhecido: use QUEDA, STATUS ou I2C", c.c_str());
+    logSerial("comando \"%s\" desconhecido: use QUEDA, STATUS, I2C ou BROKER", c.c_str());
   }
 }
 
@@ -755,6 +794,18 @@ void conectarMqtt() {
   if (mqtt.connected() || !wifiConectado) return;
   if (millis() - tMqtt < backoff) return;
   tMqtt = millis();
+#if MQTT_TLS
+  const char* origem;
+  IPAddress ipBroker = acharBroker(&origem);
+  if ((uint32_t)ipBroker == 0) {
+    backoff = min(backoff * 2, 30000UL);
+    logSerial("MQTT: %s nao respondeu ao mDNS e nao ha IP de reserva (digite BROKER <ip>), nova tentativa em %lu s",
+              BROKER, backoff / 1000);
+    return;
+  }
+  mqtt.setServer(ipBroker, PORTA);
+  logSerial("MQTT: broker %s em %s (via %s), conectando com TLS", BROKER, ipBroker.toString().c_str(), origem);
+#endif
   char id[48], lwt[110], payloadLwt[80];
   snprintf(id, sizeof(id), "catolicasc-g4-%s-%06X", DEVICE_ID, (uint32_t)ESP.getEfuseMac());
   topicoMedidor(lwt, sizeof(lwt), "status");
@@ -773,12 +824,17 @@ void conectarMqtt() {
     topicoMedidor(sub, sizeof(sub), "config");
     mqtt.subscribe(sub, 1);
     logSerial("MQTT conectado ao broker %s:%d como %s", BROKER, PORTA, id);
+    logSerial("memoria livre: %u bytes (menor desde o boot: %u)", ESP.getFreeHeap(), ESP.getMinFreeHeap());
     descarregarPendentes();
     tPub = millis() - (unsigned long)periodoS * 1000UL;   // telemetria sai ja
   } else {
     backoff = min(backoff * 2, 30000UL);
     logSerial("MQTT: falha ao conectar em %s:%d (rc=%d), nova tentativa em %lu s",
               BROKER, PORTA, mqtt.state(), backoff / 1000);
+#if MQTT_TLS
+    char erroTls[100];
+    if (net.lastError(erroTls, sizeof(erroTls))) logSerial("TLS: %s", erroTls);
+#endif
   }
 }
 
@@ -878,7 +934,7 @@ void setup() {
   Serial.println();
   logSerial("===== AquaNivel MEDIDOR %s (fw %s) =====", DEVICE_ID, FW_VERSAO);
   logSerial("Topico base: %s/%s", PREFIXO, DEVICE_ID);
-  logSerial("Comandos do monitor serial: QUEDA | STATUS | I2C");
+  logSerial("Comandos do monitor serial: QUEDA | STATUS | I2C | BROKER [ip]");
   pinMode(PIN_TRIG, OUTPUT); pinMode(PIN_ECHO, INPUT);
 
   carregarConfig();
@@ -894,10 +950,11 @@ void setup() {
   iniciarWifi();
 
 #if MQTT_TLS
-  net.setInsecure();   // sem validar a cadeia; em producao, setCACert(...)
-#endif
-
+  // O endereco do broker e resolvido a cada tentativa (conectarMqtt).
+  net.setHandshakeTimeout(8);   // segundos; o padrao de 120 s travaria o loop
+#else
   mqtt.setServer(BROKER, PORTA);
+#endif
   mqtt.setCallback(aoReceber);
   mqtt.setBufferSize(512);
 }

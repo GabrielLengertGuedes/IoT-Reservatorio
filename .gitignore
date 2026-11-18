@@ -8,7 +8,7 @@ build/
 credenciais.h
 
 # Cópia local do painel com as credenciais reais do cluster
-painel-reservatorio.local.html
+n1/painel-reservatorio.local.html
 
 # Senha real do Postgres — gere a partir do .env (ver README)
 pgadmin/pgpass
@@ -25,3 +25,7 @@ __pycache__/
 
 # Cópia do backend antigo (26/10) recuperada do Docker, só para consulta
 backend-antigo-2026-10-26/
+
+# Certificados e chaves do broker (gerados por mosquitto/gerar-certificados.sh)
+mosquitto/certs/
+certificado_ca.h
