@@ -66,7 +66,7 @@ class Ponte:
         self.cfg = cfg
         self.repo = repo
         self.regras = regras
-        # notificar(device_id, codigo, texto): avisos externos (Telegram, fase 4)
+        # notificar(device_id, codigo, texto): avisos externos (Telegram, ver telegram.py)
         self.notificar = notificar
         self.cliente: Optional[aiomqtt.Client] = None
         self.seq_hb = 0

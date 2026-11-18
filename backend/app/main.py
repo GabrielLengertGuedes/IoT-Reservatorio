@@ -23,6 +23,7 @@ from .banco import criar_engine, criar_sessoes
 from .logica import Regras
 from .ponte import Ponte
 from .repositorio import Repositorio, agora_utc
+from .telegram import criar_do_ambiente as criar_telegram
 
 logging.basicConfig(level=os.getenv("LOG_NIVEL", "INFO"),
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -37,7 +38,8 @@ async def ciclo_de_vida(app: FastAPI):
     engine = criar_engine(cfg.database_url)
     repo = Repositorio(criar_sessoes(engine))
     await criar_usuarios_do_env(repo)
-    ponte = Ponte(cfg, repo, Regras(), notificar=getattr(app.state, "notificar", None))
+    telegram = criar_telegram()   # None sem TELEGRAM_TOKEN e TELEGRAM_CHAT_ID
+    ponte = Ponte(cfg, repo, Regras(), notificar=telegram)
     app.state.repo, app.state.ponte = repo, ponte
     tarefa = asyncio.create_task(ponte.executar())
     log.info("backend no ar; broker %s:%d, prefixo %s", cfg.mqtt_host, cfg.mqtt_porta, cfg.prefixo)
@@ -45,6 +47,8 @@ async def ciclo_de_vida(app: FastAPI):
         yield
     finally:
         tarefa.cancel()
+        if telegram:
+            await telegram.fechar()
         await engine.dispose()
 
 
